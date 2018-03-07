@@ -23,6 +23,8 @@ data CompressCommand = Same
  | MirrorBack {offset :: Int}
  | Raw {rawScan :: Scanline}
  | SetByMask {col :: Nybble, setMask :: Word8}
+ | Set3ByMask {leftCol :: Nybble, midCol :: Nybble, rightCol:: Nybble,
+                setMask :: Word8}
  | Shl {col :: Nybble}
  | Shr {col :: Nybble}
  | OneBorder {leftCol :: Nybble, rightCol :: Nybble, rightCount::Word8}
@@ -40,8 +42,8 @@ instance Eq CompressCommand where --for groupping at serialization phase
 main :: IO()
 main = getArgs >>= parse
   where
-    parse ["-v"] = putStrLn "stngDelta v0.1\nDelta coding compression tool \
-      \for 'Star Trek - The Next Generation' game."
+    parse ["-v"] = putStrLn "stngDelta v0.2\nDelta coding compression tool \
+      \for 'Star Trek - The Next Generation' game. Mode 6 enabled."
     parse ["-d", inFileName, offs, outFileName] =
       decompress inFileName (read offs) outFileName
     parse ["-c", inFileName, outFileName] = compress inFileName outFileName
@@ -97,7 +99,11 @@ parseCommand = do --parse one command
     0x5 -> do
       mask <- getWord8 8
       return [SetByMask param mask]
-    0x6 -> error "0x6X command executed"--abandoned command not used by game
+    0x6 -> do --Set3ByMask
+      mCol <- getNybble
+      lCol <- getNybble
+      mask <- getWord8 8
+      return [Set3ByMask  param mCol lCol mask]
     0x7 -> return [Shl param]
     0x8 -> return [Shr param]
     0x9 -> do --OneBorder
@@ -143,6 +149,15 @@ decompressCommands xs = concat . tail $ foldl go [[0,0,0,0]] xs
             where
               changedColors = zipWith (curry replaceByFlag) curColors [7, 6.. 0]
               replaceByFlag (nyb, bitNum) = if testBit mask bitNum then color else nyb
+          Set3ByMask rCol mCol lCol mask -> fromNybbles $ reverse revChangedColors
+            where
+              revChangedColors = go' (zip (reverse curColors) [0..7])  [rCol, mCol, lCol]
+              go' [] _ = [] --all bits are tested
+              go' ((curCol, _): tuples) [] = curCol : go' tuples [] --3 colors are used
+              go' ((curCol, bitNum):tuples) news@(newCol: newCols) =
+                if mask `testBit` bitNum
+                  then newCol : go' tuples newCols --replace color
+                  else curCol : go' tuples news --don't replace, bit is not set
           Shl color -> fromNybbles changedColors
             where changedColors = tail curColors ++ [color]
           Shr color ->  fromNybbles changedColors
@@ -209,6 +224,9 @@ compressPlain plain = snd $ foldl go ([[0,0,0,0]], []) $ chunksOf 4 plain
                 (lengthAsWord mCols) (lengthAsWord rCols)
           | [place1, place2] <- diffPairPlaces =
               SetPairs place1 (head diffNewPairs) place2 (diffNewPairs !! 1)
+          | [lCol, mCol, rCol] <- diffNewColors, --mask is indexed from MSB to LSB (7 -)
+              let mask = foldl setBit 0 $ map (fromIntegral . (7 -)) diffPlaces
+              = Set3ByMask lCol mCol rCol mask
           | otherwise = Raw cur
           where
             prev = head revBuffer
@@ -263,6 +281,8 @@ serializeCommands commands = P.runPut . runBitPut $ mapM_ putCommand (group comm
                 putScan (Raw scan) = mapM_ putByte scan
                 putScan _          = error "Not Raw in putRaw"
     putCommand [SetByMask color mask] = putNybble 5 >> putNybble color >> putByte mask
+    putCommand [Set3ByMask lCol mCol rCol mask] = putNybble 6 >>
+      putNybble rCol >> putNybble mCol >> putNybble lCol >> putByte mask
     putCommand [Shl color] = putNybble 7 >> putNybble color
     putCommand [Shr color] = putNybble 8 >> putNybble color
     putCommand [OneBorder lCol rCol cnt] = putNybble 9 >> putNybble rCol
